@@ -16,8 +16,9 @@ type Document = any
 type DocumentChangedEvent = any
 type Receiver = any
 type Fragment = any
+type HasProps = any
 
-const { keys, values } = Object as any
+const { keys, values } = Object
 
 const version_range = `^${version}`
 
@@ -25,6 +26,10 @@ export type RenderBundle = {
   docs_json: DocsJson
   render_items: RenderItem[]
   div: string
+}
+
+export interface Ref {
+  id: string
 }
 
 export interface DocumentChanged {
@@ -35,11 +40,9 @@ export interface DocumentChanged {
 export interface ModelChanged extends DocumentChanged {
   event: 'jsevent'
   kind: 'ModelChanged'
-  id: string
+  model: Ref
   new: unknown
   attr: string
-  old: unknown
-  hint: unknown
 }
 
 export interface MessageSent extends DocumentChanged {
@@ -56,7 +59,7 @@ export interface MessageSent extends DocumentChanged {
 }
 
 export class BokehModel extends DOMWidgetModel {
-  defaults() {
+  defaults(): any {
     return {
       ...super.defaults(),
 
@@ -83,6 +86,7 @@ export class BokehView extends DOMWidgetView {
   private _receiver: Receiver
   private _blocked: boolean
   private _msgs: any[]
+  private _events: any[]
   private _idle: boolean
   private _combine: boolean
 
@@ -168,14 +172,14 @@ export class BokehView extends DOMWidgetView {
       if (new_msg.kind != msg.kind) {
         new_msgs.push(msg)
       } else if (msg.kind == 'ModelChanged' && new_msg.kind == 'ModelChanged') {
-        if (msg.id != new_msg.id || msg.attr != new_msg.attr) {
+        if (msg.model.id != new_msg.model.id || msg.attr != new_msg.attr) {
           new_msgs.push(msg)
         }
       } else if (msg.kind == 'MessageSent' && new_msg.kind == 'MessageSent') {
         if (
           msg.msg_data.event_values.model == null ||
           msg.msg_data.event_values.model.id !=
-            new_msg.msg_data.event_values.model.id ||
+          new_msg.msg_data.event_values.model.id ||
           msg.msg_data.event_name != new_msg.msg_data.event_name
         ) {
           new_msgs.push(msg)
@@ -198,54 +202,18 @@ export class BokehView extends DOMWidgetView {
 
   protected _change_event(event: DocumentChangedEvent): void {
     if (this._blocked) {
+      this._events.push(event)
       return
     }
-    const { ModelChangedEvent, MessageSentEvent } = bk_require(
-      'document/events'
-    )
-    if (event instanceof ModelChangedEvent) {
-      const js_msg: ModelChanged = {
-        event: 'jsevent',
-        kind: 'ModelChanged',
-        id: event.model.id,
-        attr: event.attr,
-        new: event.new_,
-        old: event.old,
-        hint: null
-      }
-      if (event.hint != null) {
-        if (event.hint.patches != null) {
-          js_msg['hint'] = {
-            column_source: event.hint.column_source,
-            patches: event.hint.patches
-          }
-        } else if (event.hint.data != null) {
-          js_msg['hint'] = {
-            column_source: event.hint.column_source,
-            data: event.hint.data,
-            rollover: event.hint.rollover
-          }
-        }
-      }
-      this._send(js_msg)
-    } else if (
-      event instanceof MessageSentEvent &&
-      event.msg_type == 'bokeh_event'
-    ) {
-      const msg_data = { ...event.msg_data }
-      const event_values = { ...msg_data.event_values }
-      if (event_values.model != null) {
-        event_values['model'] = { id: event_values.model.id }
-      }
-      msg_data['event_values'] = event_values
-      const js_msg: MessageSent = {
-        event: 'jsevent',
-        kind: 'MessageSent',
-        msg_type: event.msg_type,
-        msg_data: msg_data
-      }
-      this._send(js_msg)
+    const { Serializer } = bk_require('core/serialization')
+    const references: Map<HasProps, Ref> = new Map()
+    for (const model of event.document._all_models.values()) {
+      references.set(model, model.ref())
     }
+    const serializer = new Serializer({references})
+    const event_rep = serializer.encode(event)
+    event_rep.event = 'jsevent'
+    this._send(event_rep)
   }
 
   protected _consume_patch(
@@ -265,6 +233,11 @@ export class BokehView extends DOMWidgetView {
           this._document.apply_json_patch(comm_msg.content, comm_msg.buffers)
         } finally {
           this._blocked = false
+          const events = [...this._events]
+          this._events = []
+          for (const event of events) {
+            this._change_event(event)
+          }
         }
       }
     }
